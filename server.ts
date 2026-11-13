@@ -6,7 +6,6 @@ import cookieParser from "cookie-parser";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import { createServer as createViteServer } from "vite";
 import { PRODUCTS, CATEGORIES, AVAILABLE_COUPONS } from "./src/data/products";
 import {
   CONTENT_KINDS,
@@ -4155,6 +4154,9 @@ async function startServer() {
       })
     );
 
+    // Vite is only needed for local development, so it is loaded lazily and
+    // stays out of the production dependency tree.
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
