@@ -129,7 +129,15 @@ app.disable("x-powered-by");
 app.disable("etag");
 
 app.use(securityHeaders);
-app.use(compression({ threshold: 1024, level: 6 }));
+app.use(
+  compression({
+    threshold: 1024,
+    level: 6,
+    // The admin event stream must reach the browser immediately; compressing it
+    // makes the proxy buffer events until the buffer fills.
+    filter: (req, res) => req.path !== "/api/admin/events" && compression.filter(req, res),
+  }),
+);
 app.use(originGuard);
 app.use(cookieParser());
 app.use(requireJson);
@@ -342,6 +350,24 @@ function verifyAdminPassword(input: string): boolean {
   return Boolean(expected) && safeEqualText(input, expected);
 }
 
+/* ------------------------------------------------------------------ */
+/* Live admin event stream (Server-Sent Events)                        */
+/* ------------------------------------------------------------------ */
+
+const adminEventClients = new Set<Response>();
+
+function broadcastAdminEvent(action: string): void {
+  if (adminEventClients.size === 0) return;
+  const frame = `data: ${JSON.stringify({ type: "change", action, at: Date.now() })}\n\n`;
+  for (const client of adminEventClients) {
+    try {
+      client.write(frame);
+    } catch {
+      adminEventClients.delete(client);
+    }
+  }
+}
+
 async function auditAdmin(req: Request, action: string, detail?: unknown): Promise<void> {
   try {
     const user = (req as AuthedRequest).user;
@@ -356,6 +382,7 @@ async function auditAdmin(req: Request, action: string, detail?: unknown): Promi
         Date.now(),
       ],
     });
+    broadcastAdminEvent(action.slice(0, 120));
   } catch {
     /* audit logging must never break admin operations */
   }
@@ -2976,6 +3003,45 @@ app.post(
   }),
 );
 
+/**
+ * Live change feed consumed by the admin UI. Every audited admin action is
+ * broadcast here so open dashboards refresh without a page reload.
+ */
+app.get("/api/admin/events", requireAdmin, (req, res) => {
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store, no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+  res.write("retry: 4000\n\n");
+  res.write(`event: ready\ndata: ${JSON.stringify({ at: Date.now() })}\n\n`);
+  adminEventClients.add(res);
+
+  let heartbeat: NodeJS.Timeout | null = null;
+  const cleanup = () => {
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = null;
+    adminEventClients.delete(res);
+    try {
+      res.end();
+    } catch {
+      /* socket already closed */
+    }
+  };
+
+  heartbeat = setInterval(() => {
+    try {
+      res.write(": keep-alive\n\n");
+    } catch {
+      cleanup();
+    }
+  }, 25_000);
+
+  req.on("close", cleanup);
+  req.on("error", cleanup);
+});
+
 app.get(
   "/api/admin/content",
   requireAdmin,
@@ -3916,6 +3982,359 @@ app.patch(
   }),
 );
 
+/* -------------------------- AI assistant --------------------------- */
+
+// Built-in copy engine: no API key, no external calls, works on every deploy.
+const AI_PROVIDER = "built-in";
+const AI_MODEL = "apna-bazar-copy-v1";
+
+function truncateCopy(text: string, max: number): string {
+  const value = text.replace(/\s+/g, " ").trim();
+  if (value.length <= max) return value;
+  const cut = value.slice(0, max - 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trim()}…`;
+}
+
+function buildBuiltInProductCopy(input: {
+  name: string;
+  category: string;
+  brand: string;
+  price: number;
+  sizes: string[];
+  colors: string[];
+  notes: string;
+}): Record<string, unknown> {
+  const categoryLabel = input.category && input.category !== "general" ? input.category : "collection";
+  const brandLabel = input.brand && input.brand.toLowerCase() !== "apna bazar" ? input.brand : "";
+  const priceLine = input.price > 0 ? `₹${input.price.toLocaleString("en-IN")}` : "";
+  const sizeLine = input.sizes.length ? `Sizes: ${input.sizes.join(", ")}` : "Size options product page par";
+  const colorLine = input.colors.length ? `Colours: ${input.colors.join(", ")}` : "";
+  const firstNote = (input.notes.split(/[.\n]/)[0] || "").trim();
+
+  const intro = `${input.name} — ${brandLabel ? `${brandLabel} ki ` : ""}${categoryLabel} range se, Apna Bazar par${
+    priceLine ? ` ${priceLine} me` : ""
+  } available.`;
+  const detail = [input.notes.trim(), sizeLine, colorLine].filter(Boolean).join(" · ");
+  const description = [
+    [intro, detail].filter(Boolean).join(" "),
+    "Roz ke looks se festive occasions tak easy styling. Order dispatch se pehle quality check hota hai — size confuse ho to size chart dekh lo.",
+  ].join("\n\n");
+
+  const highlights = [
+    firstNote ? truncateCopy(firstNote, 90) : "",
+    truncateCopy(sizeLine, 90),
+    colorLine ? truncateCopy(colorLine, 90) : "",
+    "Easy styling — daily aur festive dono ke liye",
+    "Apna Bazar checked quality aur secure packaging",
+  ]
+    .filter(Boolean)
+    .slice(0, 5);
+
+  const tagPool = [
+    input.category !== "general" ? input.category : "",
+    ...input.brand.split(/\s+/),
+    ...input.name.split(/\s+/),
+    ...input.colors,
+    ...input.sizes,
+    "apna bazar",
+  ];
+  const tags = Array.from(
+    new Set(
+      tagPool
+        .map((tag) => tag.toLowerCase().replace(/[^a-z0-9]+/g, ""))
+        .filter((tag) => tag.length > 2),
+    ),
+  ).slice(0, 8);
+
+  const priceSuffix = priceLine ? ` Price ${priceLine}.` : "";
+  return {
+    hindiName: input.name,
+    description,
+    highlights,
+    seoTitle: truncateCopy(`${input.name}${brandLabel ? ` – ${brandLabel}` : ""} | Apna Bazar`, 65),
+    metaDescription: truncateCopy(
+      `${input.name}${brandLabel ? ` by ${brandLabel}` : ""}.${priceSuffix} ${sizeLine}. Shop online at Apna Bazar.`,
+      150,
+    ),
+    tags,
+    suggestedDiscountPercent: 0,
+  };
+}
+
+function sanitizeAiCopy(value: Record<string, unknown>) {
+  return {
+    hindiName: cleanText(value.hindiName, { max: 160, allowEmpty: true }) || "",
+    description: cleanText(value.description, { max: 1200, allowEmpty: true }) || "",
+    highlights: parseStringArray(value.highlights, 6, 90),
+    seoTitle: cleanText(value.seoTitle, { max: 70, allowEmpty: true }) || "",
+    metaDescription: cleanText(value.metaDescription, { max: 160, allowEmpty: true }) || "",
+    tags: parseStringArray(value.tags, 8, 30).map((tag) => tag.toLowerCase()),
+    suggestedDiscountPercent: clampInt(value.suggestedDiscountPercent, 0, 30, 0),
+  };
+}
+
+const aiLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 20,
+  prefix: "admin-ai",
+  message: "Too many AI requests. Please wait a minute.",
+});
+
+app.get("/api/admin/ai/status", requireAdmin, noStore, (_req, res) => {
+  res.json({ configured: true, provider: AI_PROVIDER, model: AI_MODEL });
+});
+
+app.post(
+  "/api/admin/ai/product-copy",
+  requireAdmin,
+  noStore,
+  aiLimiter,
+  asyncHandler(async (req, res) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const name = cleanText(body.name, { min: 2, max: 160 });
+    if (!name) throw new HttpError(400, "Add a product name first so AI can write about it.");
+    const category = cleanText(body.category, { max: 60, allowEmpty: true }) || "general";
+    const brand = cleanText(body.brand, { max: 80, allowEmpty: true }) || "Apna Bazar";
+    const notes = cleanText(body.notes, { max: 600, allowEmpty: true }) || "";
+    const sizes = parseStringArray(body.sizes, 20, 30);
+    const colors = (Array.isArray(body.colors) ? body.colors : [])
+      .slice(0, 10)
+      .map((entry) => (isPlainObject(entry) ? cleanText(entry.name, { max: 40, allowEmpty: true }) || "" : ""))
+      .filter(Boolean);
+    const price = roundMoney(Number(body.price) || 0);
+
+    const copy = sanitizeAiCopy(buildBuiltInProductCopy({ name, category, brand, price, sizes, colors, notes }));
+    if (!copy.description) throw new HttpError(500, "Could not build product copy. Please try again.");
+    await auditAdmin(req, "ai.productCopy", { provider: AI_PROVIDER, model: AI_MODEL, product: name.slice(0, 80) });
+    res.json({ success: true, provider: AI_PROVIDER, model: AI_MODEL, copy });
+  }),
+);
+
+/* ------------------------ Auto discount engine ---------------------- */
+
+interface AutoDiscountRules {
+  enabled: boolean;
+  maxDiscountPercent: number;
+  slowMovingDays: number;
+  stockThreshold: number;
+  step: number;
+}
+
+const AUTO_DISCOUNT_KEY = "auto_discount_rules";
+const DEFAULT_AUTO_DISCOUNT_RULES: AutoDiscountRules = {
+  enabled: true,
+  maxDiscountPercent: 40,
+  slowMovingDays: 30,
+  stockThreshold: 20,
+  step: 5,
+};
+
+async function loadAutoDiscountRules(): Promise<AutoDiscountRules> {
+  const stored = await getSiteSetting(AUTO_DISCOUNT_KEY);
+  const input = isPlainObject(stored) ? stored : {};
+  const enabled =
+    input.enabled === undefined
+      ? DEFAULT_AUTO_DISCOUNT_RULES.enabled
+      : input.enabled === true || input.enabled === 1 || input.enabled === "1";
+  return {
+    enabled,
+    maxDiscountPercent: clampInt(input.maxDiscountPercent, 5, 70, DEFAULT_AUTO_DISCOUNT_RULES.maxDiscountPercent),
+    slowMovingDays: clampInt(input.slowMovingDays, 1, 365, DEFAULT_AUTO_DISCOUNT_RULES.slowMovingDays),
+    stockThreshold: clampInt(input.stockThreshold, 1, 100_000, DEFAULT_AUTO_DISCOUNT_RULES.stockThreshold),
+    step: clampInt(input.step, 1, 20, DEFAULT_AUTO_DISCOUNT_RULES.step),
+  };
+}
+
+async function unitsSoldByProduct(days: number): Promise<Map<string, number>> {
+  const sold = new Map<string, number>();
+  try {
+    const result = await client.execute({
+      sql: "SELECT items_json FROM orders WHERE created_at >= ? AND status != 'cancelled' ORDER BY created_at DESC LIMIT 5000",
+      args: [Date.now() - days * 24 * 60 * 60 * 1000],
+    });
+    for (const row of result.rows) {
+      const items = safeJsonParse<CartItem[]>(String(row.items_json || "[]"), []);
+      for (const item of items) {
+        const productId = safeId(item?.product?.id, 80);
+        const quantity = clampInt(item?.quantity, 0, 1000, 0);
+        if (productId && quantity > 0) sold.set(productId, (sold.get(productId) || 0) + quantity);
+      }
+    }
+  } catch {
+    /* sales history is optional; default to zero sales */
+  }
+  return sold;
+}
+
+async function productAgeDays(): Promise<Map<string, number>> {
+  const ages = new Map<string, number>();
+  try {
+    const result = await client.execute("SELECT id, created_at FROM products LIMIT 5000");
+    const now = Date.now();
+    for (const row of result.rows) {
+      const age = Math.max(0, Math.floor((now - Number(row.created_at || now)) / 86_400_000));
+      ages.set(String(row.id), age);
+    }
+  } catch {
+    /* ageing data is optional */
+  }
+  return ages;
+}
+
+interface DiscountSuggestion {
+  id: string;
+  name: string;
+  stock: number;
+  basePrice: number;
+  currentPrice: number;
+  newPrice: number;
+  currentDiscountPercent: number;
+  projectedDiscountPercent: number;
+  extraPercent: number;
+  reason: string;
+}
+
+async function buildDiscountSuggestions(rules: AutoDiscountRules): Promise<{
+  suggestions: DiscountSuggestion[];
+  scanned: number;
+}> {
+  const products = await getCatalogProducts();
+  const [sold, ages] = await Promise.all([unitsSoldByProduct(30), productAgeDays()]);
+  const suggestions: DiscountSuggestion[] = [];
+
+  for (const product of products) {
+    const stock = product.stockCount ?? 0;
+    if (stock <= 0) continue;
+
+    const units = sold.get(product.id) || 0;
+    const age = ages.get(product.id) || 0;
+    const currentDiscount = clampInt(product.discountPercent, 0, 95, 0);
+    const reasons: string[] = [];
+    let extra = 0;
+
+    if (age >= rules.slowMovingDays && units === 0) {
+      extra += 10;
+      reasons.push(`${age} din purana, pichhle 30 din me 0 sale`);
+    }
+    if (stock >= rules.stockThreshold && units === 0) {
+      extra += 10;
+      reasons.push(`stock high (${stock}) par sale nahi`);
+    } else if (stock >= rules.stockThreshold * 2 && units <= 2) {
+      extra += 5;
+      reasons.push(`stock bahut high (${stock}), sirf ${units} sale`);
+    }
+    if (extra === 0) continue;
+
+    const basePrice = product.originalPrice > product.price ? product.originalPrice : product.price;
+    const floorPrice = Math.max(1, Math.round((basePrice * (100 - rules.maxDiscountPercent)) / 100));
+    const drop = Math.min(extra, Math.max(0, rules.maxDiscountPercent - currentDiscount));
+    if (drop <= 0) continue;
+
+    let newPrice = Math.round((product.price * (100 - drop)) / 100);
+    if (newPrice < floorPrice) newPrice = floorPrice;
+    if (newPrice >= product.price) continue;
+
+    const projected = basePrice > 0 ? clampInt(Math.round(((basePrice - newPrice) / basePrice) * 100), 0, 95, currentDiscount) : currentDiscount;
+    if (projected <= currentDiscount) continue;
+
+    suggestions.push({
+      id: product.id,
+      name: product.name,
+      stock,
+      basePrice,
+      currentPrice: product.price,
+      newPrice,
+      currentDiscountPercent: currentDiscount,
+      projectedDiscountPercent: projected,
+      extraPercent: extra,
+      reason: reasons.join(" · "),
+    });
+  }
+
+  suggestions.sort((left, right) => right.stock - left.stock);
+  return { suggestions: suggestions.slice(0, 200), scanned: products.length };
+}
+
+app.get(
+  "/api/admin/automation/discounts",
+  requireAdmin,
+  noStore,
+  asyncHandler(async (_req, res) => {
+    res.json({ rules: await loadAutoDiscountRules() });
+  }),
+);
+
+app.patch(
+  "/api/admin/automation/discounts",
+  requireAdmin,
+  noStore,
+  asyncHandler(async (req, res) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const current = await loadAutoDiscountRules();
+    const rules: AutoDiscountRules = {
+      enabled: body.enabled === undefined ? current.enabled : body.enabled === true,
+      maxDiscountPercent: clampInt(body.maxDiscountPercent, 5, 70, current.maxDiscountPercent),
+      slowMovingDays: clampInt(body.slowMovingDays, 1, 365, current.slowMovingDays),
+      stockThreshold: clampInt(body.stockThreshold, 1, 100_000, current.stockThreshold),
+      step: clampInt(body.step, 1, 20, current.step),
+    };
+    await setSiteSetting(AUTO_DISCOUNT_KEY, rules);
+    await auditAdmin(req, "automation.discountRules.update", rules);
+    res.json({ success: true, rules });
+  }),
+);
+
+app.get(
+  "/api/admin/automation/discounts/preview",
+  requireAdmin,
+  noStore,
+  asyncHandler(async (_req, res) => {
+    const rules = await loadAutoDiscountRules();
+    const { suggestions, scanned } = await buildDiscountSuggestions(rules);
+    res.json({ rules, suggestions, scanned });
+  }),
+);
+
+app.post(
+  "/api/admin/automation/discounts/apply",
+  requireAdmin,
+  noStore,
+  asyncHandler(async (req, res) => {
+    const rules = await loadAutoDiscountRules();
+    if (!rules.enabled) throw new HttpError(400, "Auto discount is switched off. Turn it on and save the rules first.");
+
+    const { suggestions } = await buildDiscountSuggestions(rules);
+    let updated = 0;
+    for (const suggestion of suggestions) {
+      const result = await client.execute({
+        sql: "UPDATE products SET price = ?, original_price = ?, discount_percent = ? WHERE id = ?",
+        args: [suggestion.newPrice, suggestion.basePrice, suggestion.projectedDiscountPercent, suggestion.id],
+      });
+      if (result.rowsAffected > 0) updated += 1;
+    }
+    invalidateCatalogCache();
+    await auditAdmin(req, "automation.discounts.apply", { updated, scanned: suggestions.length });
+    res.json({ success: true, updated });
+  }),
+);
+
+/* ------------------------- Security status -------------------------- */
+
+app.get("/api/admin/security/status", requireAdmin, noStore, (_req, res) => {
+  const databaseMode = process.env.TURSO_DATABASE_URL || process.env.DATABASE_URL ? "turso" : "local-file";
+  res.json({
+    production: isProduction,
+    passwordHashed: Boolean(ADMIN_PASSWORD_HASH),
+    passwordConfigured: Boolean(ADMIN_PASSWORD_HASH || ADMIN_PASSWORD),
+    emailAllowlist: ADMIN_EMAILS.size > 0,
+    database: databaseMode,
+    cloudinary: CLOUDINARY_READY,
+    ai: true,
+    liveUpdates: true,
+  });
+});
+
 /* ----------------------------- Settings ----------------------------- */
 
 app.get(
@@ -4194,9 +4613,16 @@ async function startServer() {
         },
       }),
     );
+    // The admin UI is deployed on Vercel, so this backend usually has no dist.
+    // Answer unmatched page requests with a clean 404 instead of a file error.
+    const distIndex = path.join(distPath, "index.html");
     app.get("*", (_req, res) => {
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-      res.sendFile(path.join(distPath, "index.html"));
+      res.sendFile(distIndex, (error) => {
+        if (error && !res.headersSent) {
+          res.status(404).json({ error: "Not found. The admin UI is served from the Vercel deployment." });
+        }
+      });
     });
   }
 

@@ -10,6 +10,7 @@ import {
   StatusPill,
   ToastView,
   inputClass,
+  useLiveRefresh,
   useToast,
 } from './AdminUI';
 
@@ -39,15 +40,15 @@ export const PeopleAdmin: React.FC = () => {
   const [broadcastBusy, setBroadcastBusy] = useState(false);
   const [confirmBroadcast, setConfirmBroadcast] = useState(false);
 
-  const load = async (term: string = search) => {
-    setLoading(true);
+  const load = async (term: string = search, silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const data = await adminApi.users(term);
       setMembers(data.users || []);
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not load members.', 'error');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -55,6 +56,8 @@ export const PeopleAdmin: React.FC = () => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useLiveRefresh(() => load(search, true));
 
   const toggleRole = async (member: AdminUser) => {
     setBusyId(member.id);
@@ -375,15 +378,15 @@ export const AuditAdmin: React.FC = () => {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (options: { silent?: boolean } = {}) => {
+    if (!options.silent) setLoading(true);
     try {
       const data = await adminApi.audit(200);
       setEntries(data.entries || []);
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not load audit log.', 'error');
     } finally {
-      setLoading(false);
+      if (!options.silent) setLoading(false);
     }
   };
 
@@ -392,11 +395,13 @@ export const AuditAdmin: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useLiveRefresh(() => load({ silent: true }));
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm font-bold text-slate-600">{entries.length} recent admin actions</p>
-        <Btn variant="outline" size="sm" onClick={load} loading={loading}>
+        <Btn variant="outline" size="sm" onClick={() => load()} loading={loading}>
           <RefreshCw className="w-3.5 h-3.5" /> Refresh
         </Btn>
       </div>

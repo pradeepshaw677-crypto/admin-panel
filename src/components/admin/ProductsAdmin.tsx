@@ -1,7 +1,21 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Plus, Pencil, Trash2, Search, RefreshCw, TrendingUp, Percent, PackageSearch } from 'lucide-react';
+import {
+  Plus,
+  Pencil,
+  Trash2,
+  Search,
+  RefreshCw,
+  TrendingUp,
+  Percent,
+  PackageSearch,
+  Sparkles,
+  Loader2,
+  Upload,
+} from 'lucide-react';
 import type { Product } from '../../types';
-import { adminApi } from './adminApi';
+import { adminApi, type AiProductCopy, type AiStatus } from './adminApi';
+import { getSizePriceDelta, formatINR } from '../../utils/pricing';
+import { uploadToCloudinary } from '../../utils/cloudinary';
 import {
   Btn,
   ConfirmDialog,
@@ -13,6 +27,7 @@ import {
   StatusPill,
   Toggle,
   inputClass,
+  useLiveRefresh,
   useToast,
   ToastView,
 } from './AdminUI';
@@ -167,8 +182,13 @@ export const ProductsAdmin: React.FC = () => {
   const [bulkCategory, setBulkCategory] = useState('');
   const [bulkBrand, setBulkBrand] = useState('');
 
-  const load = async (options: { search?: string; lowStock?: boolean } = {}) => {
-    setLoading(true);
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiResult, setAiResult] = useState<AiProductCopy | null>(null);
+  const [colorBusy, setColorBusy] = useState<number | null>(null);
+
+  const load = async (options: { search?: string; lowStock?: boolean; silent?: boolean } = {}) => {
+    if (!options.silent) setLoading(true);
     try {
       const data = await adminApi.products({
         search: options.search ?? search,
@@ -178,7 +198,7 @@ export const ProductsAdmin: React.FC = () => {
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not load products.', 'error');
     } finally {
-      setLoading(false);
+      if (!options.silent) setLoading(false);
     }
   };
 
@@ -186,6 +206,15 @@ export const ProductsAdmin: React.FC = () => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    adminApi
+      .aiStatus()
+      .then(setAiStatus)
+      .catch(() => setAiStatus({ configured: false, provider: null, model: null }));
+  }, []);
+
+  useLiveRefresh(() => load({ silent: true }));
 
   const adjustStock = async (product: Product, delta: number) => {
     const nextStock = Math.max(0, (product.stockCount ?? 0) + delta);
@@ -207,13 +236,50 @@ export const ProductsAdmin: React.FC = () => {
   const openCreate = () => {
     setEditingId(null);
     setDraft(emptyDraft());
+    setAiResult(null);
     setEditorOpen(true);
   };
 
   const openEdit = (product: Product) => {
     setEditingId(product.id);
     setDraft(toDraft(product));
+    setAiResult(null);
     setEditorOpen(true);
+  };
+
+  const runAiCopy = async () => {
+    if (!draft.name.trim()) {
+      notify('Pehle product name likho, phir AI chalega.', 'error');
+      return;
+    }
+    setAiBusy(true);
+    try {
+      const data = await adminApi.generateProductCopy({
+        name: draft.name.trim(),
+        category: draft.category,
+        brand: draft.brand.trim(),
+        price: Number(draft.price) || 0,
+        sizes: draft.sizes.split(',').map((size) => size.trim()).filter(Boolean),
+        colors: draft.colors.filter((color) => color.name.trim()).map((color) => ({ name: color.name.trim() })),
+        notes: draft.description.trim().slice(0, 300),
+      });
+      setAiResult(data.copy);
+      setDraft((current) => ({
+        ...current,
+        hindiName: current.hindiName.trim() ? current.hindiName : data.copy.hindiName,
+        description: data.copy.description || current.description,
+        highlights: data.copy.highlights.length ? data.copy.highlights.join('\n') : current.highlights,
+        discountPercent:
+          Number(current.discountPercent) > 0
+            ? current.discountPercent
+            : String(data.copy.suggestedDiscountPercent || 0),
+      }));
+      notify('AI ne draft bhar diya. Check karke Save dabao.');
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'AI request failed.', 'error');
+    } finally {
+      setAiBusy(false);
+    }
   };
 
   const saveProduct = async () => {
@@ -518,9 +584,72 @@ export const ProductsAdmin: React.FC = () => {
           </Field>
 
           <div className="sm:col-span-2">
-            <Field label="Sizes" hint="Comma separated, e.g. S, M, L, XL">
+            <Field
+              label="Sizes"
+              hint="Comma separated, e.g. S, M, L, XL. Bigger sizes add a charge on the storefront automatically."
+            >
               <input value={draft.sizes} onChange={(e) => setDraft({ ...draft, sizes: e.target.value })} className={inputClass} />
             </Field>
+            {draft.sizes.trim() && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {draft.sizes
+                  .split(',')
+                  .map((size) => size.trim())
+                  .filter(Boolean)
+                  .map((size) => {
+                    const delta = getSizePriceDelta(size);
+                    const base = Number(draft.price) || 0;
+                    return (
+                      <span
+                        key={size}
+                        className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-bold text-slate-600"
+                      >
+                        {size}: {delta > 0 ? `${formatINR(base)} + ${formatINR(delta)}` : formatINR(base)}
+                      </span>
+                    );
+                  })}
+              </div>
+            )}
+          </div>
+
+          <div className="sm:col-span-2 rounded-2xl border border-indigo-200 bg-indigo-50/70 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="flex items-center gap-1.5 text-xs font-black text-indigo-950">
+                  <Sparkles className="h-3.5 w-3.5" /> AI product assistant
+                </p>
+                <p className="text-[11px] text-indigo-800/80">
+                  {aiStatus?.provider || 'built-in'} · {aiStatus?.model || 'apna-bazar-copy-v1'} — description,
+                  highlights, Hindi name aur SEO bhar dega. Koi key nahi chahiye.
+                </p>
+              </div>
+              <Btn variant="dark" size="sm" onClick={runAiCopy} loading={aiBusy}>
+                <Sparkles className="h-3.5 w-3.5" /> AI se likho
+              </Btn>
+            </div>
+            {aiResult && (
+              <div className="mt-3 space-y-2 rounded-xl bg-white/80 p-3 text-[11px] text-slate-600">
+                {aiResult.seoTitle && (
+                  <p>
+                    <span className="font-black text-slate-800">SEO title:</span> {aiResult.seoTitle}
+                  </p>
+                )}
+                {aiResult.metaDescription && (
+                  <p>
+                    <span className="font-black text-slate-800">Meta:</span> {aiResult.metaDescription}
+                  </p>
+                )}
+                {aiResult.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {aiResult.tags.map((tag) => (
+                      <span key={tag} className="rounded-full bg-indigo-100 px-2 py-0.5 font-bold text-indigo-800">
+                        #{tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="sm:col-span-2 grid gap-4 sm:grid-cols-2">
@@ -589,7 +718,7 @@ export const ProductsAdmin: React.FC = () => {
                       ),
                     })
                   }
-                  className={`${inputClass} col-span-4`}
+                  className={`${inputClass} col-span-3`}
                 />
                 <input
                   type="color"
@@ -606,7 +735,7 @@ export const ProductsAdmin: React.FC = () => {
                 />
                 <input
                   value={color.imageUrl}
-                  placeholder="Image URL (optional)"
+                  placeholder="Colour image URL"
                   onChange={(e) =>
                     setDraft({
                       ...draft,
@@ -615,8 +744,44 @@ export const ProductsAdmin: React.FC = () => {
                       ),
                     })
                   }
-                  className={`${inputClass} col-span-5`}
+                  className={`${inputClass} col-span-4`}
                 />
+                <label
+                  className="col-span-2 flex h-9 cursor-pointer items-center justify-center gap-1 rounded-lg border border-slate-300 bg-white text-[10px] font-bold text-slate-600 hover:bg-slate-50"
+                  title="Upload this colour's photo"
+                >
+                  {colorBusy === index ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Upload className="w-3.5 h-3.5" />
+                  )}
+                  Upload
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    className="hidden"
+                    onChange={async (event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = '';
+                      if (!file) return;
+                      setColorBusy(index);
+                      try {
+                        const result = await uploadToCloudinary(file, 'products');
+                        setDraft((current) => ({
+                          ...current,
+                          colors: current.colors.map((item, position) =>
+                            position === index ? { ...item, imageUrl: result.url } : item,
+                          ),
+                        }));
+                        notify(`Colour photo uploaded (${color.name || 'colour'}).`);
+                      } catch (error) {
+                        notify(error instanceof Error ? error.message : 'Upload failed.', 'error');
+                      } finally {
+                        setColorBusy(null);
+                      }
+                    }}
+                  />
+                </label>
                 <Btn
                   variant="ghost"
                   size="sm"

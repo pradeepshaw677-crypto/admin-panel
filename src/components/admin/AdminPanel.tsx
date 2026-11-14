@@ -13,15 +13,26 @@ import {
   ShieldCheck,
   Lock,
   Loader2,
+  Sparkles,
+  Wifi,
+  WifiOff,
+  Percent,
 } from 'lucide-react';
 import type { UserProfile } from '../../types';
-import { adminApi, type AdminMetrics, type SiteSettings } from './adminApi';
-import { Btn, ToastView, inputClass, useToast } from './AdminUI';
+import {
+  adminApi,
+  closeAdminEvents,
+  subscribeLiveStatus,
+  type AdminMetrics,
+  type SiteSettings,
+} from './adminApi';
+import { Btn, ToastView, inputClass, useLiveRefresh, useToast } from './AdminUI';
 import { ProductsAdmin } from './ProductsAdmin';
 import { ContentAdmin } from './ContentAdmin';
 import { InventoryAdmin, OrdersAdmin, ReturnsAdmin } from './OperationsAdmin';
 import { AuditAdmin, PeopleAdmin } from './PeopleAdmin';
 import { SettingsAdmin } from './SettingsAdmin';
+import { AutomationAdmin } from './AutomationAdmin';
 
 type Tab =
   | 'overview'
@@ -31,6 +42,7 @@ type Tab =
   | 'orders'
   | 'returns'
   | 'members'
+  | 'automation'
   | 'settings'
   | 'audit';
 
@@ -42,6 +54,7 @@ const TABS: Array<{ id: Tab; label: string; icon: React.ComponentType<{ classNam
   { id: 'orders', label: 'Orders', icon: ShoppingBag },
   { id: 'returns', label: 'Returns & Refunds', icon: RotateCcw },
   { id: 'members', label: 'Members & Coins', icon: Users },
+  { id: 'automation', label: 'AI & Automation', icon: Sparkles },
   { id: 'settings', label: 'Settings', icon: Settings },
   { id: 'audit', label: 'Audit Log', icon: History },
 ];
@@ -168,6 +181,7 @@ export const AdminPanel: React.FC = () => {
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [settings, setSettings] = useState<SiteSettings | null>(null);
   const [configured, setConfigured] = useState(true);
+  const [live, setLive] = useState(false);
 
   const loadMetrics = async () => {
     try {
@@ -213,12 +227,23 @@ export const AdminPanel: React.FC = () => {
     }
   };
 
+  const isAdmin = user?.role === 'admin';
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    return subscribeLiveStatus(setLive);
+  }, [isAdmin]);
+
+  useLiveRefresh(loadMetrics, Boolean(isAdmin));
+
   const logout = async () => {
     try {
       await adminApi.logout();
     } catch {
       /* ignore */
     }
+    closeAdminEvents();
+    setLive(false);
     setUser(null);
     setTab('overview');
   };
@@ -254,6 +279,17 @@ export const AdminPanel: React.FC = () => {
             </div>
           </div>
           <div className="flex items-center gap-1.5">
+            <span
+              className={`hidden items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-black uppercase tracking-wider sm:inline-flex ${
+                live
+                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                  : 'border-slate-700 bg-slate-900 text-slate-400'
+              }`}
+              title={live ? 'Live updates connected — changes appear without refresh' : 'Live updates reconnecting…'}
+            >
+              {live ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+              {live ? 'Live' : 'Offline'}
+            </span>
             <Btn variant="outline" size="sm" className="!border-slate-700 !bg-slate-900 !text-slate-100" onClick={logout}>
               <LogOut className="w-3.5 h-3.5" /> Logout
             </Btn>
@@ -310,6 +346,7 @@ export const AdminPanel: React.FC = () => {
             {tab === 'orders' && <OrdersAdmin />}
             {tab === 'returns' && <ReturnsAdmin />}
             {tab === 'members' && <PeopleAdmin />}
+            {tab === 'automation' && <AutomationAdmin />}
             {tab === 'settings' && <SettingsAdmin />}
             {tab === 'audit' && <AuditAdmin />}
           </div>

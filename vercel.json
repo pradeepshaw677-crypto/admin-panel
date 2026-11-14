@@ -24,7 +24,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://apnabazar-backend-54je.onrender.com/api/:path*"
+      "destination": "https://admin-panel-v04w.onrender.com/api/:path*"
     },
     {
       "source": "/((?!api/|assets/|favicon\\.ico|favicon\\.png|logo\\.png|robots\\.txt).*)",

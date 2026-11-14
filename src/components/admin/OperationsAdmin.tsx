@@ -9,6 +9,7 @@ import {
   Modal,
   StatusPill,
   inputClass,
+  useLiveRefresh,
   useToast,
 } from './AdminUI';
 
@@ -41,8 +42,8 @@ export const OrdersAdmin: React.FC = () => {
   const [refundAmount, setRefundAmount] = useState('');
   const [restock, setRestock] = useState(true);
 
-  const load = async (options: { search?: string; status?: string } = {}) => {
-    setLoading(true);
+  const load = async (options: { search?: string; status?: string; silent?: boolean } = {}) => {
+    if (!options.silent) setLoading(true);
     try {
       const data = await adminApi.orders({
         search: options.search ?? search,
@@ -52,7 +53,7 @@ export const OrdersAdmin: React.FC = () => {
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not load orders.', 'error');
     } finally {
-      setLoading(false);
+      if (!options.silent) setLoading(false);
     }
   };
 
@@ -60,6 +61,8 @@ export const OrdersAdmin: React.FC = () => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useLiveRefresh(() => load({ silent: true }));
 
   const changeStatus = async (order: AdminOrder, status: string) => {
     setBusyId(order.id);
@@ -236,15 +239,15 @@ export const ReturnsAdmin: React.FC = () => {
   const [refundAmount, setRefundAmount] = useState('');
   const [refundCoins, setRefundCoins] = useState('');
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (options: { silent?: boolean } = {}) => {
+    if (!options.silent) setLoading(true);
     try {
       const data = await adminApi.returns();
       setReturns(data.returns || []);
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not load returns.', 'error');
     } finally {
-      setLoading(false);
+      if (!options.silent) setLoading(false);
     }
   };
 
@@ -252,6 +255,8 @@ export const ReturnsAdmin: React.FC = () => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useLiveRefresh(() => load({ silent: true }));
 
   const openAction = (record: AdminReturn, status: string) => {
     setActionTarget({ record, status });
@@ -284,7 +289,7 @@ export const ReturnsAdmin: React.FC = () => {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm font-bold text-slate-600">{returns.length} return requests</p>
-        <Btn variant="outline" size="sm" onClick={load} loading={loading}>
+        <Btn variant="outline" size="sm" onClick={() => load()} loading={loading}>
           <RefreshCw className="w-3.5 h-3.5" /> Refresh
         </Btn>
       </div>
@@ -402,8 +407,8 @@ export const InventoryAdmin: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (options: { silent?: boolean } = {}) => {
+    if (!options.silent) setLoading(true);
     try {
       const data = await adminApi.inventory();
       setItems(data.inventory || []);
@@ -411,7 +416,7 @@ export const InventoryAdmin: React.FC = () => {
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not load inventory.', 'error');
     } finally {
-      setLoading(false);
+      if (!options.silent) setLoading(false);
     }
   };
 
@@ -419,6 +424,8 @@ export const InventoryAdmin: React.FC = () => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useLiveRefresh(() => load({ silent: true }));
 
   const setStock = async (item: InventoryItem, nextStock: number) => {
     const stock = Math.max(0, Math.round(nextStock));
@@ -453,7 +460,7 @@ export const InventoryAdmin: React.FC = () => {
       </div>
 
       <div className="flex justify-end">
-        <Btn variant="outline" size="sm" onClick={load} loading={loading}>
+        <Btn variant="outline" size="sm" onClick={() => load()} loading={loading}>
           <RefreshCw className="w-3.5 h-3.5" /> Refresh
         </Btn>
       </div>

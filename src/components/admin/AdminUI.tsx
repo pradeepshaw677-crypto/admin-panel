@@ -1,6 +1,32 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, AlertCircle, Loader2, Upload, X } from 'lucide-react';
 import { uploadToCloudinary } from '../../utils/cloudinary';
+import { subscribeAdminEvents } from './adminApi';
+
+/**
+ * Re-runs `refresh` whenever another admin changes something, debounced so a
+ * burst of writes results in a single network round-trip.
+ */
+export function useLiveRefresh(refresh: () => void, enabled = true): void {
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  useEffect(() => {
+    if (!enabled) return;
+    let timer: number | null = null;
+    const unsubscribe = subscribeAdminEvents(() => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        refreshRef.current();
+      }, 400);
+    });
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      unsubscribe();
+    };
+  }, [enabled]);
+}
 
 export const inputClass =
   'w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-amber-500 focus:ring-2 focus:ring-amber-200 disabled:bg-slate-100 disabled:text-slate-400';

@@ -11,6 +11,7 @@ import {
   StatusPill,
   Toggle,
   inputClass,
+  useLiveRefresh,
   useToast,
   ToastView,
 } from './AdminUI';
@@ -281,6 +282,8 @@ export const ContentAdmin: React.FC = () => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useLiveRefresh(() => load(activeKind, true));
 
   const currentItems = useMemo(() => items[activeKind] || [], [items, activeKind]);
 

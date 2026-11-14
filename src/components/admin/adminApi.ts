@@ -124,6 +124,60 @@ export interface AuditEntry {
   created_at: number;
 }
 
+export interface AiStatus {
+  configured: boolean;
+  provider: 'gemini' | 'openai' | null;
+  model: string | null;
+}
+
+export interface AiProductCopy {
+  hindiName: string;
+  description: string;
+  highlights: string[];
+  seoTitle: string;
+  metaDescription: string;
+  tags: string[];
+  suggestedDiscountPercent: number;
+}
+
+export interface AutoDiscountRules {
+  enabled: boolean;
+  maxDiscountPercent: number;
+  slowMovingDays: number;
+  stockThreshold: number;
+  step: number;
+}
+
+export interface DiscountSuggestion {
+  id: string;
+  name: string;
+  stock: number;
+  basePrice: number;
+  currentPrice: number;
+  newPrice: number;
+  currentDiscountPercent: number;
+  projectedDiscountPercent: number;
+  extraPercent: number;
+  reason: string;
+}
+
+export interface SecurityStatus {
+  production: boolean;
+  passwordHashed: boolean;
+  passwordConfigured: boolean;
+  emailAllowlist: boolean;
+  database: string;
+  cloudinary: boolean;
+  ai: boolean;
+  liveUpdates: boolean;
+}
+
+export interface AdminLiveEvent {
+  action: string;
+  at: number;
+}
+
+
 export const adminApi = {
   login(email: string, password: string) {
     return adminRequest<{ success: boolean; user: UserProfile }>('/api/admin/auth/login', {
@@ -311,4 +365,104 @@ export const adminApi = {
   audit(limit = 100) {
     return adminRequest<{ entries: AuditEntry[] }>(`/api/admin/audit?limit=${limit}`);
   },
+
+  aiStatus() {
+    return adminRequest<AiStatus>('/api/admin/ai/status');
+  },
+  generateProductCopy(payload: {
+    name: string;
+    category?: string;
+    brand?: string;
+    price?: number;
+    sizes?: string[];
+    colors?: Array<{ name: string }>;
+    notes?: string;
+  }) {
+    return adminRequest<{ success: boolean; provider: string; model: string; copy: AiProductCopy }>(
+      '/api/admin/ai/product-copy',
+      { method: 'POST', body: JSON.stringify(payload) },
+    );
+  },
+
+  discountRules() {
+    return adminRequest<{ rules: AutoDiscountRules }>('/api/admin/automation/discounts');
+  },
+  saveDiscountRules(rules: AutoDiscountRules) {
+    return adminRequest<{ success: boolean; rules: AutoDiscountRules }>('/api/admin/automation/discounts', {
+      method: 'PATCH',
+      body: JSON.stringify(rules),
+    });
+  },
+  discountPreview() {
+    return adminRequest<{ rules: AutoDiscountRules; suggestions: DiscountSuggestion[]; scanned: number }>(
+      '/api/admin/automation/discounts/preview',
+    );
+  },
+  applyDiscounts() {
+    return adminRequest<{ success: boolean; updated: number }>(
+      '/api/admin/automation/discounts/apply',
+      { method: 'POST' },
+    );
+  },
+  securityStatus() {
+    return adminRequest<SecurityStatus>('/api/admin/security/status');
+  },
 };
+
+/* ------------------------------------------------------------------ */
+/* Live admin events (Server-Sent Events)                             */
+/* ------------------------------------------------------------------ */
+
+const liveListeners = new Set<(event: AdminLiveEvent) => void>();
+const liveStatusListeners = new Set<(connected: boolean) => void>();
+let liveSource: EventSource | null = null;
+let liveConnected = false;
+
+function emitLiveStatus(connected: boolean): void {
+  liveConnected = connected;
+  liveStatusListeners.forEach((listener) => listener(connected));
+}
+
+function openAdminEventSource(): void {
+  if (liveSource || typeof window === 'undefined' || typeof EventSource === 'undefined') return;
+  const source = new EventSource('/api/admin/events');
+  liveSource = source;
+  source.onopen = () => emitLiveStatus(true);
+  source.onerror = () => emitLiveStatus(false);
+  source.onmessage = (message) => {
+    if (!message.data) return;
+    try {
+      const parsed = JSON.parse(message.data);
+      if (!parsed || parsed.type !== 'change') return;
+      const event: AdminLiveEvent = { action: String(parsed.action || ''), at: Number(parsed.at) || Date.now() };
+      liveListeners.forEach((listener) => listener(event));
+    } catch {
+      /* ignore malformed frames */
+    }
+  };
+}
+
+export function subscribeAdminEvents(listener: (event: AdminLiveEvent) => void): () => void {
+  liveListeners.add(listener);
+  openAdminEventSource();
+  return () => {
+    liveListeners.delete(listener);
+  };
+}
+
+export function subscribeLiveStatus(listener: (connected: boolean) => void): () => void {
+  liveStatusListeners.add(listener);
+  listener(liveConnected);
+  openAdminEventSource();
+  return () => {
+    liveStatusListeners.delete(listener);
+  };
+}
+
+export function closeAdminEvents(): void {
+  if (liveSource) {
+    liveSource.close();
+    liveSource = null;
+  }
+  emitLiveStatus(false);
+}
